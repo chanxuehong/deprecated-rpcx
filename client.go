@@ -12,9 +12,10 @@ import (
 )
 
 type Client struct {
-	mutex     sync.Mutex     // protects following
-	rpcClient unsafe.Pointer // *rpc.Client, may be nil
-	closed    bool           // user has called Close
+	mutex            sync.Mutex     // protects following
+	rpcClient        unsafe.Pointer // *rpc.Client, may be nil
+	lastClosedClient *rpc.Client    // last rpc.Client closed by Client.resetConnection
+	closed           bool           // user has called Close
 
 	dialOptions dialOptions
 }
@@ -142,6 +143,7 @@ func (client *Client) resetConnection() error {
 		return nil
 	}
 	if rpcClient := client.getRpcClient(); rpcClient != nil {
+		client.lastClosedClient = rpcClient
 		if err := rpcClient.Close(); err != nil && err != rpc.ErrShutdown {
 			return err
 		}
@@ -164,7 +166,7 @@ func (client *Client) Close() error {
 	defer client.mutex.Unlock()
 
 	client.closed = true
-	if rpcClient := client.getRpcClient(); rpcClient != nil {
+	if rpcClient := client.getRpcClient(); rpcClient != nil && rpcClient != client.lastClosedClient {
 		return rpcClient.Close()
 	}
 	return nil
