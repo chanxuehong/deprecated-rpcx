@@ -16,7 +16,7 @@ import (
 type Client struct {
 	mutex            sync.Mutex     // protects following
 	client           unsafe.Pointer // *rpc.Client, may be nil
-	lastClosedClient *rpc.Client    // last rpc.Client closed by Client.resetConnection, the purpose is to make Client.Close compatible with net/rpc.Client.Close
+	closeCanBeCalled bool           // whether Client.client.Close can be called by Client.Close, the purpose is to make Client.Close compatible with net/rpc.Client.Close
 	closed           bool           // user has called Close
 
 	dialOptions dialOptions
@@ -95,6 +95,7 @@ func Dial(network, address string, opts ...DialOption) (*Client, error) {
 	if client.dialOptions.logger == nil {
 		WithLogger(defaultLogger)(&client.dialOptions)
 	}
+	client.closeCanBeCalled = true
 
 	if client.dialOptions.block {
 		if err := client.resetConnection(); err != nil {
@@ -159,7 +160,7 @@ func (client *Client) resetConnection() error {
 		return nil
 	}
 	if rpcClient := client.getClient(); rpcClient != nil {
-		client.lastClosedClient = rpcClient
+		client.closeCanBeCalled = false
 		if err := rpcClient.Close(); err != nil && err != rpc.ErrShutdown {
 			return err
 		}
@@ -173,6 +174,7 @@ func (client *Client) resetConnection() error {
 	if err != nil {
 		return err
 	}
+	client.closeCanBeCalled = true
 	client.setClient(rpc.NewClient(conn))
 	return nil
 }
@@ -182,10 +184,15 @@ func (client *Client) Close() error {
 	defer client.mutex.Unlock()
 
 	client.closed = true
-	if rpcClient := client.getClient(); rpcClient != nil && rpcClient != client.lastClosedClient {
-		return rpcClient.Close()
+	rpcClient := client.getClient()
+	if rpcClient == nil {
+		return rpc.ErrShutdown
 	}
-	return nil
+	if !client.closeCanBeCalled {
+		client.closeCanBeCalled = true // next time can be called, compatible with net/rpc.Client.Close
+		return nil
+	}
+	return rpcClient.Close()
 }
 
 func (client *Client) Call(serviceMethod string, args interface{}, reply interface{}) error {
