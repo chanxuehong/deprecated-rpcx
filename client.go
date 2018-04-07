@@ -258,5 +258,5 @@ type Logger interface {
 type logger log.Logger
 
 func (l *logger) Errorf(format string, v ...interface{}) {
-	(*log.Logger)(l).Output(3, fmt.Sprintf(format, v...))
+	(*log.Logger)(l).Output(2, fmt.Sprintf(format, v...))
 }
