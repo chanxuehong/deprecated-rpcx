@@ -2,9 +2,11 @@ package rpcx
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,19 +15,19 @@ import (
 
 type Client struct {
 	mutex            sync.Mutex     // protects following
-	rpcClient        unsafe.Pointer // *rpc.Client, may be nil
-	lastClosedClient *rpc.Client    // last rpc.Client closed by Client.resetConnection
+	client           unsafe.Pointer // *rpc.Client, may be nil
+	lastClosedClient *rpc.Client    // last rpc.Client closed by Client.resetConnection, the purpose is to make Client.Close compatible with net/rpc.Client.Close
 	closed           bool           // user has called Close
 
 	dialOptions dialOptions
 }
 
-func (client *Client) getRpcClient() *rpc.Client {
-	return (*rpc.Client)(atomic.LoadPointer(&client.rpcClient))
+func (client *Client) getClient() *rpc.Client {
+	return (*rpc.Client)(atomic.LoadPointer(&client.client))
 }
 
-func (client *Client) setRpcClient(rpcClient *rpc.Client) {
-	atomic.StorePointer(&client.rpcClient, unsafe.Pointer(rpcClient))
+func (client *Client) setClient(rpcClient *rpc.Client) {
+	atomic.StorePointer(&client.client, unsafe.Pointer(rpcClient))
 }
 
 type dialOptions struct {
@@ -33,6 +35,7 @@ type dialOptions struct {
 	address           string
 	timeout           time.Duration
 	block             bool
+	logger            Logger
 	pingServiceMethod string
 	pingInterval      time.Duration
 }
@@ -61,15 +64,24 @@ func WithBlock() DialOption {
 	}
 }
 
-func WithHeartbeat(serviceMethod string, interval time.Duration) DialOption {
+func WithLogger(logger Logger) DialOption {
 	return func(o *dialOptions) {
-		if serviceMethod == "" {
+		if logger == nil {
+			return
+		}
+		o.logger = logger
+	}
+}
+
+func WithHeartbeat(pingServiceMethod string, interval time.Duration) DialOption {
+	return func(o *dialOptions) {
+		if pingServiceMethod == "" {
 			return
 		}
 		if interval <= 0 {
 			return
 		}
-		o.pingServiceMethod = serviceMethod
+		o.pingServiceMethod = pingServiceMethod
 		o.pingInterval = interval
 	}
 }
@@ -80,6 +92,9 @@ func Dial(network, address string, opts ...DialOption) (*Client, error) {
 	for _, opt := range opts {
 		opt(&client.dialOptions)
 	}
+	if client.dialOptions.logger == nil {
+		WithLogger(defaultLogger)(&client.dialOptions)
+	}
 
 	if client.dialOptions.block {
 		if err := client.resetConnection(); err != nil {
@@ -88,7 +103,8 @@ func Dial(network, address string, opts ...DialOption) (*Client, error) {
 	} else {
 		go func() {
 			if err := client.resetConnection(); err != nil {
-				log.Println("rpc: resetConnection failed", err)
+				client.dialOptions.logger.Errorf("[error][rpcx]: resetConnection: %s", err.Error())
+				return
 			}
 		}()
 	}
@@ -118,11 +134,11 @@ func (client *Client) monitor() {
 			continue
 		}
 		if err != rpc.ErrShutdown {
-			log.Println("rpc: ping failed", err)
+			client.dialOptions.logger.Errorf("[error][rpcx]: ping: %s", err.Error())
 			continue
 		}
 		if err = client.resetConnection(); err != nil {
-			log.Println("rpc: resetConnection failed", err)
+			client.dialOptions.logger.Errorf("[error][rpcx]: resetConnection: %s", err.Error())
 			continue
 		}
 	}
@@ -142,7 +158,7 @@ func (client *Client) resetConnection() error {
 	if client.closed {
 		return nil
 	}
-	if rpcClient := client.getRpcClient(); rpcClient != nil {
+	if rpcClient := client.getClient(); rpcClient != nil {
 		client.lastClosedClient = rpcClient
 		if err := rpcClient.Close(); err != nil && err != rpc.ErrShutdown {
 			return err
@@ -157,7 +173,7 @@ func (client *Client) resetConnection() error {
 	if err != nil {
 		return err
 	}
-	client.setRpcClient(rpc.NewClient(conn))
+	client.setClient(rpc.NewClient(conn))
 	return nil
 }
 
@@ -166,7 +182,7 @@ func (client *Client) Close() error {
 	defer client.mutex.Unlock()
 
 	client.closed = true
-	if rpcClient := client.getRpcClient(); rpcClient != nil && rpcClient != client.lastClosedClient {
+	if rpcClient := client.getClient(); rpcClient != nil && rpcClient != client.lastClosedClient {
 		return rpcClient.Close()
 	}
 	return nil
@@ -177,9 +193,13 @@ func (client *Client) Call(serviceMethod string, args interface{}, reply interfa
 }
 
 func (client *Client) CallContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
-	rpcClient := client.getRpcClient()
+	rpcClient := client.getClient()
 	if rpcClient == nil {
 		return rpc.ErrShutdown
+	}
+	if ctx == context.Background() {
+		call := <-rpcClient.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1)).Done
+		return call.Error
 	}
 	select {
 	case call := <-rpcClient.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1)).Done:
@@ -194,7 +214,7 @@ func (client *Client) Go(serviceMethod string, args interface{}, reply interface
 }
 
 func (client *Client) GoContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call {
-	rpcClient := client.getRpcClient()
+	rpcClient := client.getClient()
 	if rpcClient == nil {
 		call := &rpc.Call{
 			ServiceMethod: serviceMethod,
@@ -205,6 +225,9 @@ func (client *Client) GoContext(ctx context.Context, serviceMethod string, args 
 		}
 		call.Done <- call
 		return call
+	}
+	if ctx == context.Background() {
+		return rpcClient.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1))
 	}
 	done := make(chan *rpc.Call, 1) // buffered.
 	go func() {
@@ -224,4 +247,16 @@ func (client *Client) GoContext(ctx context.Context, serviceMethod string, args 
 		call.Done <- call
 		return call
 	}
+}
+
+var defaultLogger Logger = (*logger)(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Llongfile))
+
+type Logger interface {
+	Errorf(format string, v ...interface{})
+}
+
+type logger log.Logger
+
+func (l *logger) Errorf(format string, v ...interface{}) {
+	(*log.Logger)(l).Output(3, fmt.Sprintf(format, v...))
 }
