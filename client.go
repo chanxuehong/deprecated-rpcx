@@ -38,6 +38,8 @@ type dialOptions struct {
 	logger            Logger
 	pingServiceMethod string
 	pingInterval      time.Duration
+	callInterceptor   CallInterceptor
+	goInterceptor     GoInterceptor
 }
 
 type DialOption func(*dialOptions)
@@ -83,6 +85,30 @@ func WithHeartbeat(pingServiceMethod string, interval time.Duration) DialOption 
 		}
 		o.pingServiceMethod = pingServiceMethod
 		o.pingInterval = interval
+	}
+}
+
+type CallInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker CallInvoker) error
+type CallInvoker func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error
+
+func WithCallInterceptor(interceptor CallInterceptor) DialOption {
+	return func(o *dialOptions) {
+		if interceptor == nil {
+			return
+		}
+		o.callInterceptor = interceptor
+	}
+}
+
+type GoInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker GoInvoker) *rpc.Call
+type GoInvoker func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call
+
+func WithGoInterceptor(interceptor GoInterceptor) DialOption {
+	return func(o *dialOptions) {
+		if interceptor == nil {
+			return
+		}
+		o.goInterceptor = interceptor
 	}
 }
 
@@ -200,6 +226,13 @@ func (client *Client) Call(serviceMethod string, args interface{}, reply interfa
 }
 
 func (client *Client) CallContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
+	if interceptor := client.dialOptions.callInterceptor; interceptor != nil {
+		return interceptor(ctx, serviceMethod, args, reply, client.callContext)
+	}
+	return client.callContext(ctx, serviceMethod, args, reply)
+}
+
+func (client *Client) callContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
 	rpcClient := client.getClient()
 	if rpcClient == nil {
 		return rpc.ErrShutdown
@@ -221,6 +254,13 @@ func (client *Client) Go(serviceMethod string, args interface{}, reply interface
 }
 
 func (client *Client) GoContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call {
+	if interceptor := client.dialOptions.goInterceptor; interceptor != nil {
+		return interceptor(ctx, serviceMethod, args, reply, client.goContext)
+	}
+	return client.goContext(ctx, serviceMethod, args, reply)
+}
+
+func (client *Client) goContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call {
 	rpcClient := client.getClient()
 	if rpcClient == nil {
 		call := &rpc.Call{
