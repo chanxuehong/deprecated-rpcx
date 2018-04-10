@@ -177,7 +177,7 @@ func (client *Client) ping() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var args, reply struct{}
-	return client.CallContext(ctx, client.dialOptions.pingServiceMethod, &args, &reply)
+	return client.callContext(ctx, client.dialOptions.pingServiceMethod, &args, &reply)
 }
 
 func (client *Client) resetConnection() error {
