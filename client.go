@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/chanxuehong/rpcx/peer"
 )
 
 type Client struct {
@@ -227,6 +229,7 @@ func (client *Client) Call(serviceMethod string, args interface{}, reply interfa
 
 func (client *Client) CallContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
 	if interceptor := client.dialOptions.callInterceptor; interceptor != nil {
+		ctx = peer.NewContext(ctx, client.dialOptions.address)
 		return interceptor(ctx, serviceMethod, args, reply, client.callContext)
 	}
 	return client.callContext(ctx, serviceMethod, args, reply)
@@ -255,6 +258,7 @@ func (client *Client) Go(serviceMethod string, args interface{}, reply interface
 
 func (client *Client) GoContext(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call {
 	if interceptor := client.dialOptions.goInterceptor; interceptor != nil {
+		ctx = peer.NewContext(ctx, client.dialOptions.address)
 		return interceptor(ctx, serviceMethod, args, reply, client.goContext)
 	}
 	return client.goContext(ctx, serviceMethod, args, reply)
