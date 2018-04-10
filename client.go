@@ -15,6 +15,8 @@ import (
 	"github.com/chanxuehong/rpcx/peer"
 )
 
+var ErrShutdown = rpc.ErrShutdown
+
 type Client struct {
 	mutex            sync.Mutex     // protects following
 	client           unsafe.Pointer // *rpc.Client, may be nil
@@ -40,6 +42,7 @@ type dialOptions struct {
 	logger            Logger
 	pingServiceMethod string
 	pingInterval      time.Duration
+	pingHandler       PingHandler
 	callInterceptor   CallInterceptor
 	goInterceptor     GoInterceptor
 }
@@ -56,7 +59,7 @@ func withNetworkAddress(network, address string) DialOption {
 func WithTimeout(d time.Duration) DialOption {
 	return func(o *dialOptions) {
 		if d <= 0 {
-			return
+			d = 5 * time.Second
 		}
 		o.timeout = d
 	}
@@ -77,18 +80,21 @@ func WithLogger(logger Logger) DialOption {
 	}
 }
 
-func WithHeartbeat(pingServiceMethod string, interval time.Duration) DialOption {
+func WithHeartbeat(pingServiceMethod string, interval time.Duration, handler PingHandler) DialOption {
 	return func(o *dialOptions) {
 		if pingServiceMethod == "" {
 			return
 		}
 		if interval <= 0 {
-			return
+			interval = 500 * time.Millisecond
 		}
 		o.pingServiceMethod = pingServiceMethod
 		o.pingInterval = interval
+		o.pingHandler = handler
 	}
 }
+
+type PingHandler func(pingResult error, client *Client)
 
 type CallInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker CallInvoker) error
 type CallInvoker func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error
@@ -126,13 +132,13 @@ func Dial(network, address string, opts ...DialOption) (*Client, error) {
 	client.closeCanBeCalled = true
 
 	if client.dialOptions.block {
-		if err := client.resetConnection(); err != nil {
+		if err := client.Reset(); err != nil {
 			return nil, err
 		}
 	} else {
 		go func() {
-			if err := client.resetConnection(); err != nil {
-				client.dialOptions.logger.Errorf("[error][rpcx]: resetConnection: %s", err.Error())
+			if err := client.Reset(); err != nil {
+				client.dialOptions.logger.Errorf("[error][rpcx]: Reset: %s", err.Error())
 				return
 			}
 		}()
@@ -148,8 +154,9 @@ func (client *Client) monitor() {
 	defer ticker.Stop()
 
 	var (
-		closed bool
-		err    error
+		closed      bool
+		err         error
+		pingHandler = client.dialOptions.pingHandler
 	)
 	for range ticker.C {
 		client.mutex.Lock()
@@ -159,6 +166,10 @@ func (client *Client) monitor() {
 			return
 		}
 		err = client.ping()
+		if pingHandler != nil {
+			pingHandler(err, client)
+			continue
+		}
 		if err == nil {
 			continue
 		}
@@ -166,8 +177,8 @@ func (client *Client) monitor() {
 			client.dialOptions.logger.Errorf("[error][rpcx]: ping: %s", err.Error())
 			continue
 		}
-		if err = client.resetConnection(); err != nil {
-			client.dialOptions.logger.Errorf("[error][rpcx]: resetConnection: %s", err.Error())
+		if err = client.Reset(); err != nil {
+			client.dialOptions.logger.Errorf("[error][rpcx]: Reset: %s", err.Error())
 			continue
 		}
 	}
@@ -180,12 +191,12 @@ func (client *Client) ping() error {
 	return client.callContext(ctx, client.dialOptions.pingServiceMethod, &args, &reply)
 }
 
-func (client *Client) resetConnection() error {
+func (client *Client) Reset() error {
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
 
 	if client.closed {
-		return nil
+		return rpc.ErrShutdown
 	}
 	if rpcClient := client.getClient(); rpcClient != nil {
 		client.closeCanBeCalled = false
