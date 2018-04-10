@@ -71,6 +71,10 @@ func WithBlock() DialOption {
 	}
 }
 
+type Logger interface {
+	Errorf(format string, v ...interface{})
+}
+
 func WithLogger(logger Logger) DialOption {
 	return func(o *dialOptions) {
 		if logger == nil {
@@ -80,6 +84,8 @@ func WithLogger(logger Logger) DialOption {
 	}
 }
 
+type PingHandler func(pingResult error, client *Client)
+
 func WithHeartbeat(pingServiceMethod string, interval time.Duration, handler PingHandler) DialOption {
 	return func(o *dialOptions) {
 		if pingServiceMethod == "" {
@@ -88,16 +94,17 @@ func WithHeartbeat(pingServiceMethod string, interval time.Duration, handler Pin
 		if interval <= 0 {
 			interval = 500 * time.Millisecond
 		}
+		if handler == nil {
+			handler = defaultPingHandler
+		}
 		o.pingServiceMethod = pingServiceMethod
 		o.pingInterval = interval
 		o.pingHandler = handler
 	}
 }
 
-type PingHandler func(pingResult error, client *Client)
-
-type CallInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker CallInvoker) error
 type CallInvoker func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error
+type CallInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker CallInvoker) error
 
 func WithCallInterceptor(interceptor CallInterceptor) DialOption {
 	return func(o *dialOptions) {
@@ -108,8 +115,8 @@ func WithCallInterceptor(interceptor CallInterceptor) DialOption {
 	}
 }
 
-type GoInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker GoInvoker) *rpc.Call
 type GoInvoker func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) *rpc.Call
+type GoInterceptor func(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, invoker GoInvoker) *rpc.Call
 
 func WithGoInterceptor(interceptor GoInterceptor) DialOption {
 	return func(o *dialOptions) {
@@ -153,10 +160,10 @@ func (client *Client) monitor() {
 	ticker := time.NewTicker(client.dialOptions.pingInterval)
 	defer ticker.Stop()
 
+	pingHandler := client.dialOptions.pingHandler
 	var (
-		closed      bool
-		err         error
-		pingHandler = client.dialOptions.pingHandler
+		closed bool
+		err    error
 	)
 	for range ticker.C {
 		client.mutex.Lock()
@@ -166,21 +173,21 @@ func (client *Client) monitor() {
 			return
 		}
 		err = client.ping()
-		if pingHandler != nil {
-			pingHandler(err, client)
-			continue
-		}
-		if err == nil {
-			continue
-		}
-		if err != rpc.ErrShutdown {
-			client.dialOptions.logger.Errorf("[error][rpcx]: ping: %s", err.Error())
-			continue
-		}
-		if err = client.Reset(); err != nil {
-			client.dialOptions.logger.Errorf("[error][rpcx]: Reset: %s", err.Error())
-			continue
-		}
+		pingHandler(err, client)
+	}
+}
+
+func defaultPingHandler(result error, client *Client) {
+	if result == nil {
+		return
+	}
+	if result != rpc.ErrShutdown {
+		client.dialOptions.logger.Errorf("[error][rpcx]: ping: %s", result.Error())
+		return
+	}
+	if err := client.Reset(); err != nil {
+		client.dialOptions.logger.Errorf("[error][rpcx]: Reset: %s", err.Error())
+		return
 	}
 }
 
@@ -232,6 +239,10 @@ func (client *Client) Close() error {
 		return nil
 	}
 	return rpcClient.Close()
+}
+
+func (client *Client) RemoteAddress() string {
+	return client.dialOptions.address
 }
 
 func (client *Client) Call(serviceMethod string, args interface{}, reply interface{}) error {
@@ -312,10 +323,6 @@ func (client *Client) goContext(ctx context.Context, serviceMethod string, args 
 }
 
 var defaultLogger Logger = (*logger)(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Llongfile))
-
-type Logger interface {
-	Errorf(format string, v ...interface{})
-}
 
 type logger log.Logger
 
