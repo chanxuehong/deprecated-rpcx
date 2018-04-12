@@ -71,6 +71,14 @@ func WithBlock() DialOption {
 	}
 }
 
+var defaultLogger Logger = (*logger)(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Llongfile))
+
+type logger log.Logger
+
+func (l *logger) Errorf(format string, v ...interface{}) {
+	(*log.Logger)(l).Output(2, fmt.Sprintf(format, v...))
+}
+
 type Logger interface {
 	Errorf(format string, v ...interface{})
 }
@@ -320,12 +328,4 @@ func (client *Client) goContext(ctx context.Context, serviceMethod string, args 
 		call.Done <- call
 		return call
 	}
-}
-
-var defaultLogger Logger = (*logger)(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Llongfile))
-
-type logger log.Logger
-
-func (l *logger) Errorf(format string, v ...interface{}) {
-	(*log.Logger)(l).Output(2, fmt.Sprintf(format, v...))
 }
